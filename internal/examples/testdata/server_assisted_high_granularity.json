@@ -1,0 +1,36 @@
+{
+  "name": "server_assisted_high_granularity",
+  "title": "Server-Assisted High Granularity Outage",
+  "description": "Sub-second style monitoring represented in short-second samples with a sharp outage and centralized-style recovery signal.",
+  "profile": "server_assisted",
+  "samples": [
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 120, "success": true, "latency_ms": 14},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 115, "success": true, "latency_ms": 15},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 110, "success": true, "latency_ms": 15},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 105, "success": true, "latency_ms": 16},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 100, "success": true, "latency_ms": 16},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 95, "success": false, "latency_ms": 0, "error": "timeout"},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 90, "success": false, "latency_ms": 0, "error": "timeout"},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 85, "success": false, "latency_ms": 0, "error": "timeout"},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 80, "success": true, "latency_ms": 112},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 75, "success": true, "latency_ms": 98},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 70, "success": true, "latency_ms": 76},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 65, "success": true, "latency_ms": 58},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 60, "success": true, "latency_ms": 38},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 55, "success": true, "latency_ms": 28},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 50, "success": true, "latency_ms": 24},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 45, "success": true, "latency_ms": 20},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 40, "success": true, "latency_ms": 18},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 35, "success": true, "latency_ms": 17},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 30, "success": true, "latency_ms": 16},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 25, "success": true, "latency_ms": 16},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 20, "success": true, "latency_ms": 15},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 15, "success": true, "latency_ms": 15},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 10, "success": true, "latency_ms": 15},
+    {"target": "peer-nyc", "kind": "peer", "seconds_ago": 5, "success": true, "latency_ms": 14}
+  ],
+  "events": [
+    {"target": "peer-nyc", "seconds_ago": 90, "severity": "critical", "state": "open", "message": "SLA breach detected: packet loss spike"},
+    {"target": "peer-nyc", "seconds_ago": 40, "severity": "info", "state": "resolved", "message": "Peer session recovered"}
+  ]
+}

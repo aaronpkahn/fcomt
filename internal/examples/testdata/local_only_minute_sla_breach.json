@@ -1,0 +1,27 @@
+{
+  "name": "local_only_minute_sla_breach",
+  "title": "Local-only Minute Checks with SLA Breach",
+  "description": "One-minute interval destination checks with a brief degradation and recovery.",
+  "profile": "local_only",
+  "samples": [
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 900, "success": true, "latency_ms": 21},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 840, "success": true, "latency_ms": 24},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 780, "success": true, "latency_ms": 22},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 720, "success": true, "latency_ms": 25},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 660, "success": false, "latency_ms": 0, "error": "timeout"},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 600, "success": true, "latency_ms": 91},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 540, "success": false, "latency_ms": 0, "error": "timeout"},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 480, "success": true, "latency_ms": 88},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 420, "success": true, "latency_ms": 67},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 360, "success": true, "latency_ms": 52},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 300, "success": true, "latency_ms": 38},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 240, "success": true, "latency_ms": 29},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 180, "success": true, "latency_ms": 27},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 120, "success": true, "latency_ms": 25},
+    {"target": "google-dns", "kind": "destination", "seconds_ago": 60, "success": true, "latency_ms": 24}
+  ],
+  "events": [
+    {"target": "google-dns", "seconds_ago": 540, "severity": "critical", "state": "open", "message": "SLA breach detected: elevated loss and latency"},
+    {"target": "google-dns", "seconds_ago": 180, "severity": "info", "state": "resolved", "message": "Target recovered within SLA thresholds"}
+  ]
+}
