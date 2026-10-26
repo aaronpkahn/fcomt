@@ -233,3 +233,78 @@ func TestDashboardEndpoint(t *testing.T) {
 		t.Fatalf("uptime: %+v", d.Targets)
 	}
 }
+
+func TestParseWindowDays(t *testing.T) {
+	cases := map[string]time.Duration{"7d": 168 * time.Hour, "1d": 24 * time.Hour, "168h": 168 * time.Hour, "1d12h": 36 * time.Hour, "0.5d": 12 * time.Hour, "": 24 * time.Hour}
+	for in, want := range cases {
+		got, err := parseWindow(in)
+		if err != nil || got != want {
+			t.Errorf("parseWindow(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"d", "xd", "-1d", "7days"} {
+		if _, err := parseWindow(bad); err == nil {
+			t.Errorf("parseWindow(%q) should fail", bad)
+		}
+	}
+}
+
+func TestDownsample(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	times := make([]int64, 1000)
+	ser := make([]*float64, 1000)
+	for i := range times {
+		times[i] = int64(i)
+		ser[i] = f(float64(i % 7))
+	}
+	ser[5] = nil
+	ot, os := downsample(times, [][]*float64{ser}, 500)
+	if len(ot) != 500 || len(os[0]) != 500 {
+		t.Fatalf("len %d", len(ot))
+	}
+	if os[0][2] != nil { // bucket [4,5] contains a failure
+		t.Fatalf("bucket with failure should be null")
+	}
+	if *os[0][3] != 6 { // bucket [6,7] -> max(6,0)
+		t.Fatalf("max = %v", *os[0][3])
+	}
+}
+
+func TestDashboard7dFromSQLite(t *testing.T) {
+	db, err := storage.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	old := time.Now().UTC().Add(-6 * 24 * time.Hour)
+	var rs []probe.Result
+	for i := 0; i < 2000; i++ {
+		rs = append(rs, probe.Result{Target: "a", Kind: probe.KindDestination, Timestamp: old.Add(time.Duration(i) * 30 * time.Second), Success: i != 10, Latency: time.Millisecond})
+	}
+	if err := db.InsertProbes(rs); err != nil {
+		t.Fatal(err)
+	}
+	// Empty in-memory collector: data must come from SQLite.
+	srv := New(config.Default(), metrics.NewCollector(time.Hour), incident.NewStore(10))
+	srv.SetDB(db)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/dashboard?window=7d", nil))
+	var d struct {
+		Points    int     `json:"points"`
+		RawRounds int     `json:"raw_rounds"`
+		Times     []int64 `json:"times_ms"`
+		Targets   []struct {
+			Count     int     `json:"count"`
+			UptimePct float64 `json:"uptime_pct"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(rec.Body.String())
+	}
+	if d.RawRounds != 2000 || d.Points > 500 || len(d.Times) != d.Points || d.Times[0] != old.UnixMilli() {
+		t.Fatalf("raw=%d points=%d first=%v", d.RawRounds, d.Points, d.Times)
+	}
+	if d.Targets[0].Count != 2000 || d.Targets[0].UptimePct != 100*1999.0/2000 {
+		t.Fatalf("uptime must use all probes: %+v", d.Targets)
+	}
+}

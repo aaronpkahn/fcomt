@@ -2,6 +2,15 @@
 (function () {
   const COLORS = { gateway: "#8e44ad", "google-dns": "#2980b9", "cloudflare-dns": "#e67e22", "aws-us-east-1": "#27ae60" };
   const fallback = ["#c0392b", "#16a085", "#d35400", "#2c3e50"];
+  const WINDOWS = ["1h", "6h", "24h", "7d"];
+  const KEY = "fcomt.dashWindow";
+  function currentWindow() {
+    const m = location.hash.match(/window=([^&]+)/);
+    if (m && WINDOWS.includes(m[1])) return m[1];
+    const s = localStorage.getItem(KEY);
+    return WINDOWS.includes(s) ? s : "1h";
+  }
+  let win = currentWindow();
   let plot = null;
   let plotKey = "";
   const fmt = (iso) => new Date(iso).toLocaleString("en-US", { timeZone: "America/Los_Angeles", hour12: false });
@@ -69,14 +78,14 @@
 
   async function refresh() {
     try {
-      const res = await fetch("/v1/dashboard?window=1h");
+      const res = await fetch("/v1/dashboard?window=" + encodeURIComponent(win));
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || res.status);
       if (typeof uPlot !== "undefined") renderChart(d);
       else document.getElementById("latency-chart").textContent = "uPlot failed to load from CDN";
       renderUptime(d);
       renderEvents(d);
-      document.getElementById("dash-updated").textContent = "updated " + new Date().toLocaleTimeString("en-US", { timeZone: "America/Los_Angeles" }) + " PT";
+      document.getElementById("dash-updated").textContent = `${d.points} pts / ${d.raw_rounds} rounds · updated ` + new Date().toLocaleTimeString("en-US", { timeZone: "America/Los_Angeles" }) + " PT";
     } catch (err) {
       document.getElementById("dash-updated").textContent = "refresh failed: " + err.message;
     }
@@ -88,6 +97,22 @@
       if (p) p.style.display = "none";
     }
   }).catch(() => {});
+
+  const sel = document.getElementById("dash-window");
+  const setLabels = () => document.querySelectorAll(".win-label").forEach((e) => (e.textContent = "last " + win));
+  sel.value = win;
+  setLabels();
+  sel.addEventListener("change", () => {
+    win = sel.value;
+    localStorage.setItem(KEY, win);
+    history.replaceState(null, "", "#window=" + win);
+    setLabels();
+    refresh();
+  });
+  window.addEventListener("hashchange", () => {
+    const w = currentWindow();
+    if (w !== win) { win = w; sel.value = w; setLabels(); refresh(); }
+  });
 
   refresh();
   setInterval(refresh, 30000);

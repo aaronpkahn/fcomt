@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aaron/fcomt-agent/internal/config"
@@ -319,16 +321,21 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if gaps == nil {
 		gaps = []storage.Gap{}
 	}
+	rawPoints := len(times)
+	times, series = downsample(times, series, dashboardMaxPoints)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"window":    window.String(),
-		"start":     start,
-		"end":       now,
-		"times_ms":  times,
-		"targets":   targets,
-		"latency":   series,
-		"incidents": incidents,
-		"outages":   outs,
-		"gaps":      gaps,
+		"window":     window.String(),
+		"source":     "sqlite",
+		"raw_rounds": rawPoints,
+		"points":     len(times),
+		"start":      start,
+		"end":        now,
+		"times_ms":   times,
+		"targets":    targets,
+		"latency":    series,
+		"incidents":  incidents,
+		"outages":    outs,
+		"gaps":       gaps,
 	})
 }
 
@@ -372,11 +379,75 @@ func parseWindow(raw string) (time.Duration, error) {
 	if raw == "" {
 		return 24 * time.Hour, nil
 	}
-	d, err := time.ParseDuration(raw)
+	d, err := ParseWindowDuration(raw)
 	if err != nil || d <= 0 {
-		return 0, errors.New("window must be a positive duration like 5m, 1h, or 24h")
+		return 0, errors.New("window must be a positive duration like 5m, 1h, 24h, 168h, or 7d")
 	}
 	return d, nil
+}
+
+// ParseWindowDuration is time.ParseDuration plus a day unit: "7d", "1.5d",
+// and mixed forms like "1d12h" are accepted.
+func ParseWindowDuration(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if i := strings.IndexByte(raw, 'd'); i > 0 {
+		days, err := strconv.ParseFloat(raw[:i], 64)
+		if err != nil {
+			return 0, err
+		}
+		total := time.Duration(days * float64(24*time.Hour))
+		if rest := raw[i+1:]; rest != "" {
+			r, err := time.ParseDuration(rest)
+			if err != nil {
+				return 0, err
+			}
+			total += r
+		}
+		return total, nil
+	}
+	return time.ParseDuration(raw)
+}
+
+// dashboardMaxPoints caps the number of x points returned by /v1/dashboard.
+const dashboardMaxPoints = 500
+
+// downsample buckets aligned rounds into at most max buckets. Each bucket
+// takes its first timestamp and, per target, the max latency; a bucket is
+// null (failed) if any probe of that target in it failed.
+func downsample(times []int64, series [][]*float64, max int) ([]int64, [][]*float64) {
+	n := len(times)
+	if n <= max || max <= 0 {
+		return times, series
+	}
+	per := (n + max - 1) / max
+	outT := make([]int64, 0, max)
+	outS := make([][]*float64, len(series))
+	for b := 0; b*per < n; b++ {
+		lo, hi := b*per, (b+1)*per
+		if hi > n {
+			hi = n
+		}
+		outT = append(outT, times[lo])
+		for si, ser := range series {
+			var best *float64
+			failed := false
+			for _, v := range ser[lo:hi] {
+				if v == nil {
+					failed = true
+					break
+				}
+				if best == nil || *v > *best {
+					x := *v
+					best = &x
+				}
+			}
+			if failed {
+				best = nil
+			}
+			outS[si] = append(outS[si], best)
+		}
+	}
+	return outT, outS
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
