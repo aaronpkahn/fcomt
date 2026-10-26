@@ -2,8 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"image"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -306,5 +309,56 @@ func TestDashboard7dFromSQLite(t *testing.T) {
 	}
 	if d.Targets[0].Count != 2000 || d.Targets[0].UptimePct != 100*1999.0/2000 {
 		t.Fatalf("uptime must use all probes: %+v", d.Targets)
+	}
+}
+
+func TestChartPNG(t *testing.T) {
+	db, err := storage.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	srv := New(config.Default(), metrics.NewCollector(time.Hour), incident.NewStore(10))
+	srv.SetDB(db)
+	get := func(q string) image.Image {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/chart.png"+q, nil))
+		if rec.Code != 200 || rec.Header().Get("Content-Type") != "image/png" {
+			t.Fatalf("%s: %d %s %s", q, rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+		}
+		img, err := png.Decode(rec.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return img
+	}
+	// Empty DB renders a valid placeholder chart.
+	if b := get("").Bounds(); b.Dx() != 1200 || b.Dy() != 800 {
+		t.Fatalf("size %v", b)
+	}
+	now := time.Now().UTC().Add(-2 * time.Hour)
+	var rs []probe.Result
+	for i := 0; i < 100; i++ {
+		ts := now.Add(time.Duration(i) * 30 * time.Second)
+		rs = append(rs, probe.Result{Target: "google-dns", Kind: probe.KindDestination, Timestamp: ts, Success: i%10 != 0, Latency: 20 * time.Millisecond},
+			probe.Result{Target: "gateway", Kind: probe.KindGateway, Timestamp: ts, Success: true, Latency: 3 * time.Millisecond})
+	}
+	if err := db.InsertProbes(rs); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := db.OpenOutage(now.Add(10*time.Minute), "isp")
+	_ = db.CloseOutage(id, now.Add(12*time.Minute))
+	_ = db.InsertGap(storage.Gap{Start: now.Add(20 * time.Minute), End: now.Add(25 * time.Minute), Reason: "sleep"})
+	if p := os.Getenv("CHART_OUT"); p != "" {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/chart.png?window=7d", nil))
+		_ = os.WriteFile(p, rec.Body.Bytes(), 0o644)
+	}
+	get("?window=7d")
+	get("?window=1h")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/chart.png?window=bogus", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad window: %d", rec.Code)
 	}
 }

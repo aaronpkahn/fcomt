@@ -58,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/export/evidence", s.handleEvidence)
 	mux.HandleFunc("/v1/outages", s.handleOutages)
 	mux.HandleFunc("/v1/dashboard", s.handleDashboard)
+	mux.HandleFunc("/chart.png", s.handleChartPNG)
 	mux.HandleFunc("/v1/reports/daily", s.handleReport("daily"))
 	mux.HandleFunc("/v1/reports/monthly", s.handleReport("monthly"))
 	mux.HandleFunc("/v1/examples", s.handleExamples)
@@ -256,12 +257,36 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	d, err := s.dashboardData(window)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
+// dashData is the SQLite-backed payload shared by /v1/dashboard and /chart.png.
+type dashData struct {
+	Window    string           `json:"window"`
+	Source    string           `json:"source"`
+	RawRounds int              `json:"raw_rounds"`
+	Points    int              `json:"points"`
+	Start     time.Time        `json:"start"`
+	End       time.Time        `json:"end"`
+	TimesMS   []int64          `json:"times_ms"`
+	Targets   []*dashTarget    `json:"targets"`
+	Latency   [][]*float64     `json:"latency"`
+	Incidents []incident.Event `json:"incidents"`
+	Outages   []storage.Outage `json:"outages"`
+	Gaps      []storage.Gap    `json:"gaps"`
+}
+
+func (s *Server) dashboardData(window time.Duration) (*dashData, error) {
 	now := time.Now().UTC()
 	start := now.Add(-window)
 	probes, err := s.db.ProbesSince(start)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+		return nil, err
 	}
 	// Rounds share a timestamp, so align on unique timestamps.
 	idx := map[int64]int{}
@@ -299,18 +324,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	incidents, err := s.db.Incidents(time.Unix(0, 0), now, 200)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+		return nil, err
 	}
 	outs, err := s.db.Outages(time.Unix(0, 0), now)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+		return nil, err
 	}
 	gaps, err := s.db.Gaps(time.Unix(0, 0), now)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+		return nil, err
 	}
 	if incidents == nil {
 		incidents = []incident.Event{}
@@ -323,20 +345,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	rawPoints := len(times)
 	times, series = downsample(times, series, dashboardMaxPoints)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"window":     window.String(),
-		"source":     "sqlite",
-		"raw_rounds": rawPoints,
-		"points":     len(times),
-		"start":      start,
-		"end":        now,
-		"times_ms":   times,
-		"targets":    targets,
-		"latency":    series,
-		"incidents":  incidents,
-		"outages":    outs,
-		"gaps":       gaps,
-	})
+	return &dashData{
+		Window: window.String(), Source: "sqlite", RawRounds: rawPoints, Points: len(times),
+		Start: start, End: now, TimesMS: times, Targets: targets, Latency: series,
+		Incidents: incidents, Outages: outs, Gaps: gaps,
+	}, nil
 }
 
 func (s *Server) handleReport(kind string) http.HandlerFunc {
