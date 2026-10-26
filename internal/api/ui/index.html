@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FComT Local Visualizer</title>
     <link rel="stylesheet" href="/ui/style.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css" />
   </head>
   <body>
     <main class="container">
@@ -14,6 +15,30 @@
       </header>
 
       <section class="panel">
+        <div class="chart-head">
+          <h2>Latency, last hour (ms; breaks = failed probe)</h2>
+          <span id="dash-updated" class="muted"></span>
+        </div>
+        <div id="latency-chart"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Uptime per target, last hour</h2>
+        <div id="uptime-bars" class="bars"></div>
+      </section>
+
+      <section class="panel grid">
+        <article><h3>Outages</h3><p id="outage-count">-</p></article>
+        <article><h3>Gaps (sleep/restart)</h3><p id="gap-count">-</p></article>
+        <article><h3>Incidents</h3><p id="incident-count">-</p></article>
+      </section>
+
+      <section class="panel">
+        <h2>Outages, gaps &amp; incidents (all recorded)</h2>
+        <ul id="event-list" class="events"></ul>
+      </section>
+
+      <section class="panel" id="seeder-panel">
         <h2>Scenario Seeder</h2>
         <div class="row">
           <select id="scenario-select"></select>
@@ -76,6 +101,8 @@
         <ul id="incident-list"></ul>
       </section>
     </main>
+    <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
     <script src="/ui/app.js"></script>
+    <script src="/ui/charts.js"></script>
   </body>
   </html>

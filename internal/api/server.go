@@ -55,6 +55,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/incidents", s.handleIncidents)
 	mux.HandleFunc("/v1/export/evidence", s.handleEvidence)
 	mux.HandleFunc("/v1/outages", s.handleOutages)
+	mux.HandleFunc("/v1/dashboard", s.handleDashboard)
 	mux.HandleFunc("/v1/reports/daily", s.handleReport("daily"))
 	mux.HandleFunc("/v1/reports/monthly", s.handleReport("monthly"))
 	mux.HandleFunc("/v1/examples", s.handleExamples)
@@ -227,6 +228,108 @@ func (s *Server) handleOutages(w http.ResponseWriter, r *http.Request) {
 		gaps = []storage.Gap{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"outages": outs, "gaps": gaps})
+}
+
+type dashTarget struct {
+	Target       string  `json:"target"`
+	Kind         string  `json:"kind"`
+	Count        int     `json:"count"`
+	SuccessCount int     `json:"success_count"`
+	UptimePct    float64 `json:"uptime_pct"`
+}
+
+// handleDashboard serves chart data read from SQLite: aligned per-round
+// latency series (null = failed probe), per-target uptime, and the
+// incident/outage/gap lists for the window.
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+		return
+	}
+	window, err := parseWindow(r.URL.Query().Get("window"))
+	if r.URL.Query().Get("window") == "" {
+		window = time.Hour
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	now := time.Now().UTC()
+	start := now.Add(-window)
+	probes, err := s.db.ProbesSince(start)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	// Rounds share a timestamp, so align on unique timestamps.
+	idx := map[int64]int{}
+	times := []int64{}
+	tIdx := map[string]int{}
+	targets := []*dashTarget{}
+	for _, p := range probes {
+		ts := p.Timestamp.UnixMilli()
+		if _, ok := idx[ts]; !ok {
+			idx[ts] = len(times)
+			times = append(times, ts)
+		}
+		if _, ok := tIdx[p.Target]; !ok {
+			tIdx[p.Target] = len(targets)
+			targets = append(targets, &dashTarget{Target: p.Target, Kind: string(p.Kind)})
+		}
+	}
+	series := make([][]*float64, len(targets))
+	for i := range series {
+		series[i] = make([]*float64, len(times))
+	}
+	for _, p := range probes {
+		t := targets[tIdx[p.Target]]
+		t.Count++
+		if p.Success {
+			t.SuccessCount++
+			v := float64(p.Latency.Microseconds()) / 1000.0
+			series[tIdx[p.Target]][idx[p.Timestamp.UnixMilli()]] = &v
+		}
+	}
+	for _, t := range targets {
+		if t.Count > 0 {
+			t.UptimePct = 100 * float64(t.SuccessCount) / float64(t.Count)
+		}
+	}
+	incidents, err := s.db.Incidents(time.Unix(0, 0), now, 200)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	outs, err := s.db.Outages(time.Unix(0, 0), now)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	gaps, err := s.db.Gaps(time.Unix(0, 0), now)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if incidents == nil {
+		incidents = []incident.Event{}
+	}
+	if outs == nil {
+		outs = []storage.Outage{}
+	}
+	if gaps == nil {
+		gaps = []storage.Gap{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"window":    window.String(),
+		"start":     start,
+		"end":       now,
+		"times_ms":  times,
+		"targets":   targets,
+		"latency":   series,
+		"incidents": incidents,
+		"outages":   outs,
+		"gaps":      gaps,
+	})
 }
 
 func (s *Server) handleReport(kind string) http.HandlerFunc {

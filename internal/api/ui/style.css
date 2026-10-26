@@ -166,3 +166,14 @@ li {
     padding: 8px 6px;
   }
 }
+
+.muted { color: #888; font-size: 0.85em; }
+.bars .bar-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.bars .bar-label { width: 140px; font-family: monospace; }
+.bars .bar-track { flex: 1; background: #eee; height: 18px; border-radius: 4px; overflow: hidden; }
+.bars .bar-fill { height: 100%; }
+.bars .bar-val { width: 90px; text-align: right; font-family: monospace; }
+.events li { font-family: monospace; font-size: 0.9em; margin: 3px 0; }
+.events .outage { color: #c0392b; }
+.events .gap { color: #7f8c8d; }
+#latency-chart { min-height: 320px; }

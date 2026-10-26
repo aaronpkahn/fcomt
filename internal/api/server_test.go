@@ -200,3 +200,36 @@ func TestReportEndpoints(t *testing.T) {
 		t.Fatalf("expected 400, got %d", rec.Code)
 	}
 }
+
+func TestDashboardEndpoint(t *testing.T) {
+	db, err := storage.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Now().UTC().Add(-time.Minute)
+	_ = db.InsertProbes([]probe.Result{
+		{Target: "a", Kind: probe.KindDestination, Timestamp: now, Success: true, Latency: 10 * time.Millisecond},
+		{Target: "b", Kind: probe.KindDestination, Timestamp: now, Success: false},
+	})
+	srv := New(config.Default(), metrics.NewCollector(time.Hour), incident.NewStore(10))
+	srv.SetDB(db)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/dashboard?window=1h", nil))
+	var d struct {
+		Times   []int64      `json:"times_ms"`
+		Latency [][]*float64 `json:"latency"`
+		Targets []struct {
+			UptimePct float64 `json:"uptime_pct"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Times) != 1 || len(d.Latency) != 2 || d.Latency[0][0] == nil || *d.Latency[0][0] != 10 || d.Latency[1][0] != nil {
+		t.Fatalf("unexpected dashboard: %s", rec.Body.String())
+	}
+	if d.Targets[0].UptimePct != 100 || d.Targets[1].UptimePct != 0 {
+		t.Fatalf("uptime: %+v", d.Targets)
+	}
+}
