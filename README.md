@@ -9,6 +9,25 @@ The goal is practical ISP accountability:
 - keep working even without cloud connectivity,
 - optionally sync results to a shared server/API for team dashboards and escalation workflows.
 
+## What's implemented today (24/7 outage monitoring)
+
+- **Probing:** every 30s (`monitoring.local_probe_interval_s`) all targets are probed once per round, concurrently: the external destinations (TCP connect) plus the local **gateway** (auto-detected via `route -n get default`, or `monitoring.gateway.host`; TCP 80 then 53, where a refused connection still counts as reachable, no ICMP).
+- **Outages:** when every external destination fails in the same round an outage opens; it closes when any succeeds. Cause is `isp` if the gateway answered, `local` if the gateway was down too.
+- **Gaps:** if rounds are more than 3x the interval apart (Mac asleep) or the agent restarts after a pause, a gap record is written. Gap time is excluded from uptime and reported separately.
+- **Storage:** every probe, incident, outage and gap is saved to SQLite (pure Go, no cgo) at `~/Library/Application Support/fcomt/fcomt.db` (`storage.path` or `-db`). Recent history is reloaded on startup.
+- **Incidents:** per-target incidents need `sla.consecutive_rounds` (default 2) bad rounds in a row. Latency limits are per target (`latency_ms_max` on a destination, 0 = off). The global latency and jitter checks are off by default.
+- **Reports:** `GET /v1/reports/daily?date=YYYY-MM-DD` and `GET /v1/reports/monthly?month=YYYY-MM` (add `&format=csv`) use America/Los_Angeles day boundaries. They include uptime %, outage count, downtime (ISP and local), every outage, and gaps. CLI: `bin/fcomt-agent -report daily -date 2026-10-25 [-format text|json|csv]`, or `-report monthly -date 2026-10`. `GET /v1/outages?window=24h` lists recent outages and gaps.
+- **Evidence export** (`/v1/export/evidence?window=24h`) only includes incidents, outages and gaps inside the window.
+- **Demo data:** `POST /v1/examples/seed` is disabled unless `api.enable_demo: true`.
+
+### Running it on macOS
+
+```bash
+make build                 # also writes bin/fcomt-agent
+./deploy/install.sh        # launchd agent com.aaronkahn.fcomt (RunAtLoad + KeepAlive), logs in ./logs
+./deploy/nosleep.sh        # sudo pmset: disable system/disk sleep
+```
+
 ## Disclaimer
 
 This project is an independent, open implementation focused on ISP accountability and local-first monitoring.

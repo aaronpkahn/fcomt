@@ -8,7 +8,7 @@ GO_CACHE_DIR ?= $(CURDIR)/.cache/go-build
 GO_MOD_CACHE_DIR ?= $(CURDIR)/.cache/go-mod
 GO_ENV = GOCACHE=$(GO_CACHE_DIR) GOMODCACHE=$(GO_MOD_CACHE_DIR)
 
-.PHONY: help cache run build test examples seed ui demo
+.PHONY: help cache run build bin test report install nosleep examples seed ui demo
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -19,8 +19,21 @@ cache: ## Create local Go cache directories used by make targets
 run: cache ## Run the agent API + local visualizer
 	@$(GO_ENV) go run ./cmd/fcomt-agent
 
-build: cache ## Build the project
+build: cache bin ## Build the project (also produces bin/fcomt-agent)
 	@$(GO_ENV) go build ./...
+
+bin: cache ## Build the agent binary at bin/fcomt-agent
+	@mkdir -p bin
+	@$(GO_ENV) go build -o bin/fcomt-agent ./cmd/fcomt-agent
+
+report: bin ## Print today's outage report from the DB (DATE=YYYY-MM-DD optional)
+	@./bin/fcomt-agent -report daily $(if $(DATE),-date $(DATE))
+
+install: bin ## Install + load the launchd agent (deploy/install.sh)
+	@./deploy/install.sh
+
+nosleep: ## Disable system sleep (sudo; deploy/nosleep.sh)
+	@./deploy/nosleep.sh
 
 test: cache ## Run unit tests
 	@$(GO_ENV) go test ./...

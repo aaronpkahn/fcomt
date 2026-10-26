@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"time"
@@ -14,6 +15,8 @@ import (
 	"github.com/aaron/fcomt-agent/internal/export"
 	"github.com/aaron/fcomt-agent/internal/incident"
 	"github.com/aaron/fcomt-agent/internal/metrics"
+	"github.com/aaron/fcomt-agent/internal/report"
+	"github.com/aaron/fcomt-agent/internal/storage"
 )
 
 //go:embed ui/*
@@ -24,7 +27,11 @@ type Server struct {
 	collector *metrics.Collector
 	store     *incident.Store
 	examples  *examples.Library
+	db        *storage.DB
 }
+
+// SetDB enables DB-backed endpoints (reports, outages, windowed evidence).
+func (s *Server) SetDB(db *storage.DB) { s.db = db }
 
 func New(cfg config.AppConfig, collector *metrics.Collector, store *incident.Store) *Server {
 	return &Server{
@@ -47,6 +54,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/metrics/timeseries", s.handleTimeSeries)
 	mux.HandleFunc("/v1/incidents", s.handleIncidents)
 	mux.HandleFunc("/v1/export/evidence", s.handleEvidence)
+	mux.HandleFunc("/v1/outages", s.handleOutages)
+	mux.HandleFunc("/v1/reports/daily", s.handleReport("daily"))
+	mux.HandleFunc("/v1/reports/monthly", s.handleReport("monthly"))
 	mux.HandleFunc("/v1/examples", s.handleExamples)
 	mux.HandleFunc("/v1/examples/seed", s.handleSeedExample)
 	return mux
@@ -147,7 +157,11 @@ func (s *Server) handleEvidence(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	bundle := export.BuildEvidence(s.cfg, s.collector, s.store, window, time.Now().UTC())
+	bundle, err := export.BuildEvidence(s.cfg, s.collector, s.store, s.db, window, time.Now().UTC())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, bundle)
 }
 
@@ -160,6 +174,10 @@ func (s *Server) handleExamples(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleSeedExample(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.API.EnableDemo {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "demo seeding disabled; set api.enable_demo: true"})
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use POST"})
 		return
@@ -179,6 +197,72 @@ func (s *Server) handleSeedExample(w http.ResponseWriter, r *http.Request) {
 		"message":   "example scenario loaded",
 		"summaries": s.collector.Summaries(24*time.Hour, time.Now().UTC()),
 	})
+}
+
+func (s *Server) handleOutages(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+		return
+	}
+	window, err := parseWindow(r.URL.Query().Get("window"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	now := time.Now().UTC()
+	outs, err := s.db.Outages(now.Add(-window), now)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	gaps, err := s.db.Gaps(now.Add(-window), now)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if outs == nil {
+		outs = []storage.Outage{}
+	}
+	if gaps == nil {
+		gaps = []storage.Gap{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"outages": outs, "gaps": gaps})
+}
+
+func (s *Server) handleReport(kind string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.db == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+			return
+		}
+		now := time.Now()
+		var rep report.Report
+		var err error
+		if kind == "daily" {
+			date := r.URL.Query().Get("date")
+			if date == "" {
+				date = now.In(report.Location).Format("2006-01-02")
+			}
+			rep, err = report.Daily(s.db, date, now)
+		} else {
+			month := r.URL.Query().Get("month")
+			if month == "" {
+				month = now.In(report.Location).Format("2006-01")
+			}
+			rep, err = report.Monthly(s.db, month, now)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if r.URL.Query().Get("format") == "csv" {
+			w.Header().Set("Content-Type", "text/csv")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=fcomt-%s-%s.csv", rep.Kind, rep.Period))
+			_ = report.WriteCSV(w, rep)
+			return
+		}
+		writeJSON(w, http.StatusOK, rep)
+	}
 }
 
 func parseWindow(raw string) (time.Duration, error) {

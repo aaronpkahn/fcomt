@@ -22,6 +22,23 @@ type AppConfig struct {
 	Monitoring MonitoringConfig `yaml:"monitoring" json:"monitoring"`
 	SLA        SLAConfig        `yaml:"sla" json:"sla"`
 	API        APIConfig        `yaml:"api" json:"api"`
+	Storage    StorageConfig    `yaml:"storage" json:"storage"`
+}
+
+// StorageConfig controls the on-disk SQLite history. An empty path means
+// ~/Library/Application Support/fcomt/fcomt.db.
+type StorageConfig struct {
+	Path string `yaml:"path" json:"path"`
+	// LoadHistoryHours is how much history is loaded into memory on startup.
+	LoadHistoryHours int `yaml:"load_history_hours" json:"load_history_hours"`
+}
+
+// GatewayConfig controls probing of the local router. When Host is empty the
+// default gateway is auto-detected (macOS: route -n get default).
+type GatewayConfig struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	Host    string `yaml:"host" json:"host"`
+	Port    int    `yaml:"port" json:"port"`
 }
 
 type AgentConfig struct {
@@ -40,12 +57,18 @@ type MonitoringConfig struct {
 	Destinations           []TargetConfig `yaml:"destinations" json:"destinations"`
 	Peers                  []TargetConfig `yaml:"peers" json:"peers"`
 	EnablePublicSpeedtests bool           `yaml:"enable_public_speedtests" json:"enable_public_speedtests"`
+	Gateway                GatewayConfig  `yaml:"gateway" json:"gateway"`
+	// GapFactor: a round arriving more than GapFactor x interval after the
+	// previous one is recorded as a monitoring gap (e.g. machine asleep).
+	GapFactor float64 `yaml:"gap_factor" json:"gap_factor"`
 }
 
 type TargetConfig struct {
 	Name string `yaml:"name" json:"name"`
 	Host string `yaml:"host" json:"host"`
 	Port int    `yaml:"port" json:"port"`
+	// LatencyMSMax is a per-target average latency limit; 0 disables it.
+	LatencyMSMax float64 `yaml:"latency_ms_max" json:"latency_ms_max"`
 }
 
 type SLAConfig struct {
@@ -54,10 +77,15 @@ type SLAConfig struct {
 	JitterMSMax        float64 `yaml:"jitter_ms_max" json:"jitter_ms_max"`
 	PacketLossPctMax   float64 `yaml:"packet_loss_pct_max" json:"packet_loss_pct_max"`
 	AvailabilityPctMin float64 `yaml:"availability_pct_min" json:"availability_pct_min"`
+	// ConsecutiveRounds is how many consecutive bad rounds are needed before a
+	// target incident opens (avoids single-probe noise). Minimum 1.
+	ConsecutiveRounds int `yaml:"consecutive_rounds" json:"consecutive_rounds"`
 }
 
 type APIConfig struct {
 	Listen string `yaml:"listen" json:"listen"`
+	// EnableDemo allows POST /v1/examples/seed to load fake data. Off by default.
+	EnableDemo bool `yaml:"enable_demo" json:"enable_demo"`
 }
 
 func Default() AppConfig {
@@ -70,7 +98,7 @@ func Default() AppConfig {
 		},
 		Monitoring: MonitoringConfig{
 			Profile:               ProfileLocalOnly,
-			LocalProbeIntervalS:   60,
+			LocalProbeIntervalS:   30,
 			ServerProbeIntervalMS: 500,
 			ProbeTimeoutS:         3,
 			SessionTimeoutS:       30,
@@ -81,17 +109,21 @@ func Default() AppConfig {
 			},
 			Peers:                  nil,
 			EnablePublicSpeedtests: true,
+			Gateway:                GatewayConfig{Enabled: true},
+			GapFactor:              3,
 		},
 		SLA: SLAConfig{
 			Profile:            "isp-primary",
-			LatencyMSMax:       40,
-			JitterMSMax:        10,
+			LatencyMSMax:       0, // global latency check off; use per-target latency_ms_max
+			JitterMSMax:        0,
+			ConsecutiveRounds:  2,
 			PacketLossPctMax:   0.5,
 			AvailabilityPctMin: 99.9,
 		},
 		API: APIConfig{
 			Listen: "127.0.0.1:8080",
 		},
+		Storage: StorageConfig{LoadHistoryHours: 7 * 24},
 	}
 }
 
@@ -137,6 +169,15 @@ func (c AppConfig) Validate() error {
 			return fmt.Errorf("peer %q: %w", t.Name, err)
 		}
 	}
+	if c.Monitoring.Gateway.Port < 0 || c.Monitoring.Gateway.Port > 65535 {
+		return fmt.Errorf("monitoring.gateway.port out of range: %d", c.Monitoring.Gateway.Port)
+	}
+	if c.Monitoring.GapFactor != 0 && c.Monitoring.GapFactor < 1.5 {
+		return errors.New("monitoring.gap_factor must be >= 1.5 (or 0 for default 3)")
+	}
+	if c.SLA.ConsecutiveRounds < 0 {
+		return errors.New("sla.consecutive_rounds must be >= 0")
+	}
 	if c.API.Listen == "" {
 		return errors.New("api.listen cannot be empty")
 	}
@@ -161,8 +202,20 @@ func validateTarget(t TargetConfig) error {
 	if strings.TrimSpace(t.Host) == "" {
 		return errors.New("host cannot be empty")
 	}
+	if t.LatencyMSMax < 0 {
+		return errors.New("latency_ms_max must be >= 0")
+	}
 	if t.Port < 0 || t.Port > 65535 {
 		return fmt.Errorf("port out of range: %d", t.Port)
 	}
 	return nil
+}
+
+// GapThreshold returns the wall-clock delay between rounds that counts as a gap.
+func (m MonitoringConfig) GapThreshold() time.Duration {
+	f := m.GapFactor
+	if f == 0 {
+		f = 3
+	}
+	return time.Duration(f * float64(m.ProbeInterval()))
 }

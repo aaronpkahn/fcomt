@@ -12,7 +12,13 @@ type Kind string
 const (
 	KindDestination Kind = "destination"
 	KindPeer        Kind = "peer"
+	// KindGateway is the local router; it is excluded from the
+	// "all external destinations failed" outage test.
+	KindGateway Kind = "gateway"
 )
+
+// IsExternal reports whether results of this kind count toward internet reachability.
+func (k Kind) IsExternal() bool { return k == KindDestination }
 
 type Target struct {
 	Name string `json:"name"`

@@ -14,8 +14,8 @@ func TestDefaultConfigIsValid(t *testing.T) {
 	if cfg.Monitoring.Profile != ProfileLocalOnly {
 		t.Fatalf("expected local_only profile, got %s", cfg.Monitoring.Profile)
 	}
-	if got := cfg.Monitoring.ProbeInterval().Seconds(); got != 60 {
-		t.Fatalf("expected 60s local interval, got %.0fs", got)
+	if got := cfg.Monitoring.ProbeInterval().Seconds(); got != 30 {
+		t.Fatalf("expected 30s local interval, got %.0fs", got)
 	}
 }
 
