@@ -28,6 +28,75 @@ make build                 # also writes bin/fcomt-agent
 ./deploy/nosleep.sh        # sudo pmset: disable system/disk sleep
 ```
 
+## Operating on the Mac Mini
+
+The agent runs 24/7 on the Mac Mini from `~/src/fcomt` under launchd.
+
+**What it probes.** Every 30s it runs one probe round against 4 targets concurrently:
+- `gateway`: the home router at `192.168.86.1`, auto-detected from the default route. It's used to tell local outages from ISP outages.
+- `google-dns` (8.8.8.8), `cloudflare-dns` (1.1.1.1), and `aws-us-east-1`.
+
+**Storage.** Every probe, incident, outage, and gap is persisted to SQLite at `~/Library/Application Support/fcomt/fcomt.db` (WAL mode; override with `-db`). History survives restarts and is reloaded at startup.
+
+**Dashboard.** Open http://127.0.0.1:8080/ui/.
+- It shows a uPlot latency chart (breaks = failed probes), uptime % per target, and outage, gap, and incident lists.
+- The window selector offers **1h / 6h / 24h / 7d**. It defaults to 1h and remembers your choice in the URL hash (`#window=7d`) and localStorage. It refreshes every 30s.
+- The data comes from `GET /v1/dashboard?window=1h` (JSON, read from SQLite). Windows accept Go durations plus days: `90m`, `24h`, `168h`, `7d`, `1d12h`. Long windows are downsampled server-side to at most 500 points. Each bucket takes the max latency and is null if any probe in it failed. Uptime % always uses every probe.
+
+**PNG chart.** `GET /chart.png?window=7d` (default `7d`, same window syntax) returns a 1200x800 PNG rendered server-side in pure Go (gonum/plot, no browser). It shows:
+- the latency lines per target, with a legend;
+- outages as red bands and gaps as gray bands;
+- the PT time range, uptime % per target, and the outage count.
+
+```sh
+curl -s -o chart.png '127.0.0.1:8080/chart.png?window=24h'
+```
+
+**Reports.**
+- `GET /v1/reports/daily?date=YYYY-MM-DD`
+- `GET /v1/reports/monthly?month=YYYY-MM`
+- `GET /v1/outages?window=24h`
+
+Add `&format=csv` to a report for CSV. Days are bounded in America/Los_Angeles. The CLI equivalents are:
+
+```sh
+bin/fcomt-agent -report daily -date 2026-10-25 -format text   # or json|csv
+bin/fcomt-agent -report monthly -date 2026-10
+```
+
+**launchd service.**
+- The plist is `~/Library/LaunchAgents/com.aaronkahn.fcomt.plist` (template in `deploy/`; `make install` installs it).
+- It has `RunAtLoad` and `KeepAlive`, so the agent starts at login and is restarted if it exits.
+- It runs `/Users/akahn/src/fcomt/bin/fcomt-agent` with `WorkingDirectory` set to `~/src/fcomt`.
+
+```sh
+launchctl load -w ~/Library/LaunchAgents/com.aaronkahn.fcomt.plist     # load/start
+launchctl unload -w ~/Library/LaunchAgents/com.aaronkahn.fcomt.plist   # stop/unload
+make build && launchctl kickstart -k gui/$(id -u)/com.aaronkahn.fcomt  # rebuild + restart
+```
+
+**Is it running?**
+
+```sh
+launchctl list | grep fcomt          # PID, last exit status (0 = ok), label
+ps aux | grep fcomt-agent
+curl -s 127.0.0.1:8080/healthz       # {"status":"ok"}
+```
+
+**Logs** are in `~/src/fcomt/logs/`. Go's logger writes to stderr, so the normal running log is `fcomt.err.log`, not just errors. `fcomt.out.log` is usually empty.
+
+```sh
+tail -f ~/src/fcomt/logs/fcomt.err.log
+```
+
+**Prevent sleep.** A sleeping Mac records gaps, not uptime. Disable system sleep with:
+
+```sh
+sudo pmset -a sleep 0
+```
+
+For the fuller set of settings, run `deploy/nosleep.sh` (`make nosleep`). It also disables disk sleep and standby, and enables wake-on-LAN and auto-restart after power loss.
+
 ## Disclaimer
 
 This project is an independent, open implementation focused on ISP accountability and local-first monitoring.
