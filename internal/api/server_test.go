@@ -362,3 +362,42 @@ func TestChartPNG(t *testing.T) {
 		t.Fatalf("bad window: %d", rec.Code)
 	}
 }
+
+func TestDashboardFastRowsWeighted(t *testing.T) {
+	db, err := storage.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	t0 := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Second)
+	var rs []probe.Result
+	add := func(at time.Duration, ok bool, mode string) {
+		rs = append(rs, probe.Result{Target: "cloudflare-dns", Kind: probe.KindDestination, Timestamp: t0.Add(at), Success: ok, Mode: mode, Latency: 20 * time.Millisecond})
+	}
+	for i := 0; i < 10; i++ {
+		add(time.Duration(i)*30*time.Second, true, probe.ModeNormal)
+	}
+	add(300*time.Second, false, probe.ModeNormal)
+	for s := 302; s <= 370; s += 2 {
+		add(time.Duration(s)*time.Second, s > 308, probe.ModeFast)
+	}
+	add(400*time.Second, true, probe.ModeNormal)
+	if err := db.InsertProbes(rs); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(config.Default(), metrics.NewCollector(time.Hour), incident.NewStore(10))
+	srv.SetDB(db)
+	d, err := srv.dashboardData(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.TimesMS) != 12 || d.FastRounds != 35 || d.RawRounds != 47 || len(d.FastWindows) != 1 || d.FastWindows[0].Rounds != 35 {
+		t.Fatalf("times=%d fast=%d raw=%d windows=%+v", len(d.TimesMS), d.FastRounds, d.RawRounds, d.FastWindows)
+	}
+	if u := d.Targets[0]; u.Count != 47 || u.FastCount != 35 || u.MonitoredSeconds-u.UpSeconds != 10 || u.UptimePct < 97.6 {
+		t.Fatalf("weighted uptime %+v", u)
+	}
+	if _, err := renderChart(d); err != nil {
+		t.Fatal(err)
+	}
+}

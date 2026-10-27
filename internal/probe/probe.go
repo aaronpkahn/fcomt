@@ -34,6 +34,23 @@ type Result struct {
 	Latency   time.Duration `json:"latency"`
 	Success   bool          `json:"success"`
 	Error     string        `json:"error,omitempty"`
+	// Mode is the polling mode the round ran in: "normal" (regular cadence),
+	// "fast" or "slow" (fast-poll window after a failure). Empty means normal.
+	Mode string `json:"mode,omitempty"`
+}
+
+const (
+	ModeNormal = "normal"
+	ModeFast   = "fast"
+	ModeSlow   = "slow"
+)
+
+// NormalizedMode returns r.Mode, treating empty as ModeNormal.
+func (r Result) NormalizedMode() string {
+	if r.Mode == "" {
+		return ModeNormal
+	}
+	return r.Mode
 }
 
 type Prober interface {

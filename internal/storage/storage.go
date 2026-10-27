@@ -106,8 +106,52 @@ func Open(path string) (*DB, error) {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	if err := migrate(sqlDB); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 	return &DB{db: sqlDB}, nil
 }
+
+// migrate applies additive, idempotent schema changes to existing databases.
+// Every step checks the current schema first, so running it on every Open is
+// safe. Older binaries keep working against a migrated DB because they name
+// their INSERT columns and new columns have defaults.
+func migrate(db *sql.DB) error {
+	has, err := hasColumn(db, "probes", "mode")
+	if err != nil {
+		return err
+	}
+	if !has {
+		// mode: polling mode of the round (normal | fast | slow). Existing
+		// rows were all taken at the regular cadence.
+		if _, err := db.Exec(`ALTER TABLE probes ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'`); err != nil {
+			return fmt.Errorf("add probes.mode: %w", err)
+		}
+	}
+	return nil
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// HasColumn reports whether table has column (used by tests and diagnostics).
+func (d *DB) HasColumn(table, column string) (bool, error) { return hasColumn(d.db, table, column) }
 
 func (d *DB) Close() error { return d.db.Close() }
 
@@ -119,7 +163,7 @@ func (d *DB) InsertProbes(results []probe.Result) error {
 	if err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare(`INSERT INTO probes(ts_ms,target,kind,latency_us,success,error) VALUES(?,?,?,?,?,?)`)
+	stmt, err := tx.Prepare(`INSERT INTO probes(ts_ms,target,kind,latency_us,success,error,mode) VALUES(?,?,?,?,?,?,?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -130,7 +174,7 @@ func (d *DB) InsertProbes(results []probe.Result) error {
 		if r.Success {
 			succ = 1
 		}
-		if _, err := stmt.Exec(ms(r.Timestamp), r.Target, string(r.Kind), r.Latency.Microseconds(), succ, r.Error); err != nil {
+		if _, err := stmt.Exec(ms(r.Timestamp), r.Target, string(r.Kind), r.Latency.Microseconds(), succ, r.Error, r.NormalizedMode()); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -140,7 +184,7 @@ func (d *DB) InsertProbes(results []probe.Result) error {
 
 // ProbesSince returns probes with timestamp >= since, oldest first.
 func (d *DB) ProbesSince(since time.Time) ([]probe.Result, error) {
-	rows, err := d.db.Query(`SELECT ts_ms,target,kind,latency_us,success,error FROM probes WHERE ts_ms >= ? ORDER BY ts_ms`, ms(since))
+	rows, err := d.db.Query(`SELECT ts_ms,target,kind,latency_us,success,error,mode FROM probes WHERE ts_ms >= ? ORDER BY ts_ms`, ms(since))
 	if err != nil {
 		return nil, err
 	}
@@ -148,14 +192,14 @@ func (d *DB) ProbesSince(since time.Time) ([]probe.Result, error) {
 	var out []probe.Result
 	for rows.Next() {
 		var ts, lat int64
-		var target, kind, errStr string
+		var target, kind, errStr, mode string
 		var succ int
-		if err := rows.Scan(&ts, &target, &kind, &lat, &succ, &errStr); err != nil {
+		if err := rows.Scan(&ts, &target, &kind, &lat, &succ, &errStr, &mode); err != nil {
 			return nil, err
 		}
 		out = append(out, probe.Result{
 			Target: target, Kind: probe.Kind(kind), Timestamp: fromMS(ts),
-			Latency: time.Duration(lat) * time.Microsecond, Success: succ == 1, Error: errStr,
+			Latency: time.Duration(lat) * time.Microsecond, Success: succ == 1, Error: errStr, Mode: mode,
 		})
 	}
 	return out, rows.Err()

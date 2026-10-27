@@ -78,7 +78,15 @@ func (p GatewayProber) Probe(ctx context.Context, target Target) Result {
 	dial := p.Dial
 	if dial == nil {
 		// Split the budget so a silent port 80 doesn't starve the port-53 try.
-		per := p.Timeout / time.Duration(len(ports))
+		budget := p.Timeout
+		// Honor a tighter context deadline (fast-poll rounds use 1s) so every
+		// port still gets a share instead of port 80 eating the whole budget.
+		if dl, ok := ctx.Deadline(); ok {
+			if rem := time.Until(dl); rem > 0 && (budget <= 0 || rem < budget) {
+				budget = rem
+			}
+		}
+		per := budget / time.Duration(len(ports))
 		if per <= 0 {
 			per = time.Second
 		}

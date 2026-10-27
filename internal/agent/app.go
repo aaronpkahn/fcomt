@@ -91,8 +91,19 @@ func loadHistory(cfg config.AppConfig, db *storage.DB, c *metrics.Collector, s *
 	if err != nil {
 		return err
 	}
+	// Feed the collector at the normal cadence only, as the runner does, so
+	// fast-poll rows don't skew its round-based loss/latency summaries.
+	sampler := scheduler.CadenceSampler{Interval: cfg.Monitoring.ProbeInterval()}
+	var lastTS time.Time
+	keep := true
 	for _, p := range probes {
-		c.Add(p)
+		if !p.Timestamp.Equal(lastTS) {
+			lastTS = p.Timestamp
+			keep = sampler.Allow(p.Timestamp, p.Mode)
+		}
+		if keep {
+			c.Add(p)
+		}
 	}
 	events, err := db.Incidents(since, now, 1000)
 	if err != nil {

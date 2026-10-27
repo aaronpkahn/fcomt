@@ -61,6 +61,53 @@ type MonitoringConfig struct {
 	// GapFactor: a round arriving more than GapFactor x interval after the
 	// previous one is recorded as a monitoring gap (e.g. machine asleep).
 	GapFactor float64 `yaml:"gap_factor" json:"gap_factor"`
+	// FastPoll temporarily raises the probe cadence after a failure so the
+	// start and end of an outage are known to within a couple of seconds.
+	FastPoll FastPollConfig `yaml:"fast_poll" json:"fast_poll"`
+}
+
+// FastPollConfig controls the fast-poll-on-failure window. The window opens on
+// the first round in which any external destination fails, probes only the
+// gateway plus Targets every IntervalMS (each probe limited to
+// ProbeTimeoutMS), and closes TailS seconds after the first fully successful
+// round. If the window has been open for MaxFastS seconds it drops to
+// SlowIntervalMS until recovery (then the same tail applies).
+type FastPollConfig struct {
+	Enabled        bool `yaml:"enabled" json:"enabled"`
+	IntervalMS     int  `yaml:"interval_ms" json:"interval_ms"`
+	ProbeTimeoutMS int  `yaml:"probe_timeout_ms" json:"probe_timeout_ms"`
+	TailS          int  `yaml:"tail_s" json:"tail_s"`
+	MaxFastS       int  `yaml:"max_fast_s" json:"max_fast_s"`
+	SlowIntervalMS int  `yaml:"slow_interval_ms" json:"slow_interval_ms"`
+	// Targets are the destinations probed in fast mode (the gateway is always
+	// included). Names that match no destination are ignored; if none match,
+	// fast rounds probe every target.
+	Targets []string `yaml:"targets" json:"targets"`
+}
+
+func (f FastPollConfig) Interval() time.Duration {
+	return time.Duration(f.IntervalMS) * time.Millisecond
+}
+func (f FastPollConfig) SlowInterval() time.Duration {
+	return time.Duration(f.SlowIntervalMS) * time.Millisecond
+}
+func (f FastPollConfig) ProbeTimeout() time.Duration {
+	return time.Duration(f.ProbeTimeoutMS) * time.Millisecond
+}
+func (f FastPollConfig) Tail() time.Duration    { return time.Duration(f.TailS) * time.Second }
+func (f FastPollConfig) MaxFast() time.Duration { return time.Duration(f.MaxFastS) * time.Second }
+
+// DefaultFastPoll: 2s cadence, 1s timeout, 60s tail, 10 min cap then 10s.
+func DefaultFastPoll() FastPollConfig {
+	return FastPollConfig{
+		Enabled:        true,
+		IntervalMS:     2000,
+		ProbeTimeoutMS: 1000,
+		TailS:          60,
+		MaxFastS:       600,
+		SlowIntervalMS: 10000,
+		Targets:        []string{"cloudflare-dns", "google-dns"},
+	}
 }
 
 type TargetConfig struct {
@@ -111,6 +158,7 @@ func Default() AppConfig {
 			EnablePublicSpeedtests: true,
 			Gateway:                GatewayConfig{Enabled: true},
 			GapFactor:              3,
+			FastPoll:               DefaultFastPoll(),
 		},
 		SLA: SLAConfig{
 			Profile:            "isp-primary",
@@ -174,6 +222,20 @@ func (c AppConfig) Validate() error {
 	}
 	if c.Monitoring.GapFactor != 0 && c.Monitoring.GapFactor < 1.5 {
 		return errors.New("monitoring.gap_factor must be >= 1.5 (or 0 for default 3)")
+	}
+	if fp := c.Monitoring.FastPoll; fp.Enabled {
+		switch {
+		case fp.IntervalMS <= 0:
+			return errors.New("monitoring.fast_poll.interval_ms must be > 0")
+		case fp.ProbeTimeoutMS <= 0 || fp.ProbeTimeoutMS > fp.IntervalMS:
+			return errors.New("monitoring.fast_poll.probe_timeout_ms must be > 0 and <= interval_ms")
+		case fp.TailS < 0:
+			return errors.New("monitoring.fast_poll.tail_s must be >= 0")
+		case fp.MaxFastS <= 0:
+			return errors.New("monitoring.fast_poll.max_fast_s must be > 0")
+		case fp.SlowIntervalMS < fp.IntervalMS:
+			return errors.New("monitoring.fast_poll.slow_interval_ms must be >= interval_ms")
+		}
 	}
 	if c.SLA.ConsecutiveRounds < 0 {
 		return errors.New("sla.consecutive_rounds must be >= 0")

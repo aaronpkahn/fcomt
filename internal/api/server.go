@@ -17,6 +17,7 @@ import (
 	"github.com/aaron/fcomt-agent/internal/export"
 	"github.com/aaron/fcomt-agent/internal/incident"
 	"github.com/aaron/fcomt-agent/internal/metrics"
+	"github.com/aaron/fcomt-agent/internal/probe"
 	"github.com/aaron/fcomt-agent/internal/report"
 	"github.com/aaron/fcomt-agent/internal/storage"
 )
@@ -239,6 +240,11 @@ type dashTarget struct {
 	Count        int     `json:"count"`
 	SuccessCount int     `json:"success_count"`
 	UptimePct    float64 `json:"uptime_pct"`
+	// FastCount rows came from fast-poll windows. Uptime is time-weighted
+	// (MonitoredSeconds/UpSeconds), so those short-interval rows don't skew it.
+	FastCount        int     `json:"fast_count"`
+	MonitoredSeconds float64 `json:"monitored_seconds"`
+	UpSeconds        float64 `json:"up_seconds"`
 }
 
 // handleDashboard serves chart data read from SQLite: aligned per-round
@@ -279,6 +285,11 @@ type dashData struct {
 	Incidents []incident.Event `json:"incidents"`
 	Outages   []storage.Outage `json:"outages"`
 	Gaps      []storage.Gap    `json:"gaps"`
+	// FastRounds counts fast/slow-mode rounds in the window; they are left out
+	// of the latency series (which stays at the normal cadence) and shown as
+	// FastWindows instead. Outage start/end already use the fine-grained rows.
+	FastRounds  int                 `json:"fast_rounds"`
+	FastWindows []report.FastWindow `json:"fast_windows"`
 }
 
 func (s *Server) dashboardData(window time.Duration) (*dashData, error) {
@@ -288,20 +299,33 @@ func (s *Server) dashboardData(window time.Duration) (*dashData, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Rounds share a timestamp, so align on unique timestamps.
+	// Per-target uptime, time-weighted over every row (normal and fast).
+	fp := s.cfg.Monitoring.FastPoll
+	ups := report.WeightedUptime(probes, report.Cadence{
+		Normal: s.cfg.Monitoring.ProbeInterval(), Fast: fp.Interval(), Slow: fp.SlowInterval(),
+	})
+	tIdx := map[string]int{}
+	targets := make([]*dashTarget, 0, len(ups))
+	for i, u := range ups {
+		tIdx[u.Target] = i
+		targets = append(targets, &dashTarget{Target: u.Target, Kind: u.Kind, Count: u.Count, SuccessCount: u.SuccessCount,
+			UptimePct: u.UptimePct, FastCount: u.FastCount, MonitoredSeconds: u.MonitoredSeconds, UpSeconds: u.UpSeconds})
+	}
+	// Latency series: normal-cadence rounds only, aligned on unique
+	// timestamps (rounds share one). Fast rounds probe a reduced target set
+	// at a short timeout, so mixing them in would look like failures.
 	idx := map[int64]int{}
 	times := []int64{}
-	tIdx := map[string]int{}
-	targets := []*dashTarget{}
+	allRounds := map[int64]bool{}
 	for _, p := range probes {
 		ts := p.Timestamp.UnixMilli()
+		allRounds[ts] = true
+		if p.NormalizedMode() != probe.ModeNormal {
+			continue
+		}
 		if _, ok := idx[ts]; !ok {
 			idx[ts] = len(times)
 			times = append(times, ts)
-		}
-		if _, ok := tIdx[p.Target]; !ok {
-			tIdx[p.Target] = len(targets)
-			targets = append(targets, &dashTarget{Target: p.Target, Kind: string(p.Kind)})
 		}
 	}
 	series := make([][]*float64, len(targets))
@@ -309,19 +333,13 @@ func (s *Server) dashboardData(window time.Duration) (*dashData, error) {
 		series[i] = make([]*float64, len(times))
 	}
 	for _, p := range probes {
-		t := targets[tIdx[p.Target]]
-		t.Count++
-		if p.Success {
-			t.SuccessCount++
-			v := float64(p.Latency.Microseconds()) / 1000.0
-			series[tIdx[p.Target]][idx[p.Timestamp.UnixMilli()]] = &v
+		if p.NormalizedMode() != probe.ModeNormal || !p.Success {
+			continue
 		}
+		v := float64(p.Latency.Microseconds()) / 1000.0
+		series[tIdx[p.Target]][idx[p.Timestamp.UnixMilli()]] = &v
 	}
-	for _, t := range targets {
-		if t.Count > 0 {
-			t.UptimePct = 100 * float64(t.SuccessCount) / float64(t.Count)
-		}
-	}
+	fastWindows := report.FastWindows(probes)
 	incidents, err := s.db.Incidents(time.Unix(0, 0), now, 200)
 	if err != nil {
 		return nil, err
@@ -343,12 +361,13 @@ func (s *Server) dashboardData(window time.Duration) (*dashData, error) {
 	if gaps == nil {
 		gaps = []storage.Gap{}
 	}
-	rawPoints := len(times)
+	normalRounds := len(times)
 	times, series = downsample(times, series, dashboardMaxPoints)
 	return &dashData{
-		Window: window.String(), Source: "sqlite", RawRounds: rawPoints, Points: len(times),
+		Window: window.String(), Source: "sqlite", RawRounds: len(allRounds), Points: len(times),
 		Start: start, End: now, TimesMS: times, Targets: targets, Latency: series,
 		Incidents: incidents, Outages: outs, Gaps: gaps,
+		FastRounds: len(allRounds) - normalRounds, FastWindows: fastWindows,
 	}, nil
 }
 

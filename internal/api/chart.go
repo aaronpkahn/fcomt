@@ -119,6 +119,12 @@ func renderChart(d *dashData) ([]byte, error) {
 			return nil, err
 		}
 	}
+	for _, f := range d.FastWindows {
+		// Pad zero-length (single-round) windows so they remain visible.
+		if err := band(float64(f.Start.Unix())-1, float64(f.End.Unix())+1, color.NRGBA{0x34, 0x98, 0xdb, 0x40}); err != nil {
+			return nil, err
+		}
+	}
 	for _, o := range d.Outages {
 		e := d.End
 		if o.End != nil {
@@ -171,6 +177,9 @@ func renderChart(d *dashData) ([]byte, error) {
 	}
 	p.Legend.Add("outage", legendSwatch{0xe7, 0x4c, 0x3c, 0x88})
 	p.Legend.Add("gap (sleep/restart)", legendSwatch{0x99, 0x99, 0x99, 0x88})
+	if len(d.FastWindows) > 0 {
+		p.Legend.Add("fast-poll window", legendSwatch{0x34, 0x98, 0xdb, 0x88})
+	}
 	p.Legend.Top = true
 	p.Legend.Left = true
 	p.Legend.TextStyle.Font.Size = vg.Points(10)
@@ -191,12 +200,12 @@ func renderChart(d *dashData) ([]byte, error) {
 	}
 	upLine := "no probe data in window"
 	if len(ups) > 0 {
-		upLine = "uptime: " + strings.Join(ups, " · ")
+		upLine = "uptime (time-weighted): " + strings.Join(ups, " · ")
 	}
 	p.Title.Text = fmt.Sprintf("FComT latency, window %s  (%s → %s PT)", windowLabel(d.End.Sub(d.Start)), ptTime(time.Unix(int64(xmin), 0)), ptTime(d.End))
 	p.Title.TextStyle.Font.Size = vg.Points(15)
-	p.X.Label.Text = fmt.Sprintf("%s\noutages: %d · gaps: %d · incidents: %d · %d points from %d rounds (SQLite) · breaks = failed probes",
-		upLine, len(d.Outages), len(d.Gaps), len(d.Incidents), d.Points, d.RawRounds)
+	p.X.Label.Text = fmt.Sprintf("%s\noutages: %d · gaps: %d · fast-poll windows: %d · incidents: %d · %d points from %d rounds (SQLite) · breaks = failed probes",
+		upLine, len(d.Outages), len(d.Gaps), len(d.FastWindows), len(d.Incidents), d.Points, d.RawRounds)
 
 	wt, err := p.WriterTo(vg.Length(1200)*vg.Inch/96, vg.Length(800)*vg.Inch/96, "png")
 	if err != nil {

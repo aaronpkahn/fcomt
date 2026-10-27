@@ -31,6 +31,8 @@ type Runner struct {
 	detector outage.Detector
 	outageID int64
 	lastWall time.Time
+	fast     *FastPoll
+	sampler  CadenceSampler
 }
 
 func New(
@@ -41,6 +43,7 @@ func New(
 	store *incident.Store,
 	logger *log.Logger,
 ) *Runner {
+	normal := IntervalForProfile(cfg.Monitoring.Profile, cfg.Monitoring)
 	return &Runner{
 		cfg:       cfg,
 		prober:    prober,
@@ -48,7 +51,48 @@ func New(
 		evaluator: evaluator,
 		store:     store,
 		logger:    logger,
+		fast:      NewFastPoll(normal, cfg.Monitoring.FastPoll),
+		sampler:   CadenceSampler{Interval: normal},
 	}
+}
+
+// Mode returns the polling mode of the next round (normal, fast, or slow).
+func (r *Runner) Mode() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.fast.Mode()
+}
+
+// NextInterval returns the delay until the next round for the current mode.
+func (r *Runner) NextInterval() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.fast.Interval()
+}
+
+// RoundTargets returns the targets for the next round: everything in normal
+// mode, or the gateway plus fast_poll.targets during a fast-poll window.
+func (r *Runner) RoundTargets() []probe.Target {
+	all := r.Targets()
+	if r.Mode() == probe.ModeNormal {
+		return all
+	}
+	return FastTargets(all, r.cfg.Monitoring.FastPoll.Targets)
+}
+
+// Step runs one round in the current mode and returns the delay until the next.
+func (r *Runner) Step(ctx context.Context, started time.Time) time.Duration {
+	r.RunRound(ctx, r.RoundTargets(), started)
+	return r.NextInterval()
+}
+
+func (r *Runner) probeTimeout(mode string) time.Duration {
+	if mode != probe.ModeNormal {
+		if t := r.cfg.Monitoring.FastPoll.ProbeTimeout(); t > 0 {
+			return t
+		}
+	}
+	return r.cfg.Monitoring.ProbeTimeout()
 }
 
 // SetDB enables persistence.
@@ -109,16 +153,24 @@ func (r *Runner) Start(ctx context.Context) {
 	interval := IntervalForProfile(r.cfg.Monitoring.Profile, r.cfg.Monitoring)
 	r.logger.Printf("starting probe rounds: profile=%s targets=%d interval=%s", r.cfg.Monitoring.Profile, len(targets), interval)
 
+	if r.fast.Enabled {
+		fp := r.cfg.Monitoring.FastPoll
+		r.logger.Printf("fast-poll on failure: interval=%s timeout=%s tail=%s cap=%s then %s targets=gateway+%v",
+			r.fast.Fast, fp.ProbeTimeout(), r.fast.Tail, r.fast.MaxFast, r.fast.Slow, fp.Targets)
+	}
+
 	go func() {
-		r.RunRound(ctx, targets, time.Now())
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		// Rounds are scheduled from each round's start, and the cadence is
+		// re-read after every round so a fast-poll window takes effect at once.
 		for {
+			started := time.Now()
+			next := r.Step(ctx, started)
+			timer := time.NewTimer(time.Until(started.Add(next)))
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return
-			case <-ticker.C:
-				r.RunRound(ctx, targets, time.Now())
+			case <-timer.C:
 			}
 		}
 	}()
@@ -160,16 +212,19 @@ func IntervalForProfile(profile config.Profile, m config.MonitoringConfig) time.
 // so time spent asleep is visible).
 func (r *Runner) RunRound(ctx context.Context, targets []probe.Target, started time.Time) []probe.Result {
 	roundTime := started.Round(0).UTC()
+	mode := r.Mode()
+	timeout := r.probeTimeout(mode)
 	results := make([]probe.Result, len(targets))
 	var wg sync.WaitGroup
 	for i, t := range targets {
 		wg.Add(1)
 		go func(i int, t probe.Target) {
 			defer wg.Done()
-			pctx, cancel := context.WithTimeout(ctx, r.cfg.Monitoring.ProbeTimeout())
+			pctx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 			res := r.prober.Probe(pctx, t)
 			res.Timestamp = roundTime // align the round
+			res.Mode = mode
 			results[i] = res
 		}(i, t)
 	}
@@ -177,11 +232,11 @@ func (r *Runner) RunRound(ctx context.Context, targets []probe.Target, started t
 	if ctx.Err() != nil {
 		return results
 	}
-	r.processRound(roundTime, results)
+	r.processRound(roundTime, mode, results)
 	return results
 }
 
-func (r *Runner) processRound(roundTime time.Time, results []probe.Result) {
+func (r *Runner) processRound(roundTime time.Time, mode string, results []probe.Result) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -200,11 +255,20 @@ func (r *Runner) processRound(roundTime time.Time, results []probe.Result) {
 			r.closeOutage(r.lastWall)
 			r.detector = outage.Detector{}
 		}
+		// Likewise a fast-poll window can't span a sleep.
+		if r.fast.Mode() != probe.ModeNormal {
+			r.logger.Printf("FASTPOLL reset after gap")
+			r.fast.Reset()
+		}
 	}
 	r.lastWall = roundTime
 
-	for _, res := range results {
-		r.collector.Add(res)
+	// Round-counting consumers see at most one round per normal interval.
+	sampled := r.sampler.Allow(roundTime, mode)
+	if sampled {
+		for _, res := range results {
+			r.collector.Add(res)
+		}
 	}
 	if r.db != nil {
 		if err := r.db.InsertProbes(results); err != nil {
@@ -230,10 +294,23 @@ func (r *Runner) processRound(roundTime time.Time, results []probe.Result) {
 		r.closeOutage(tr.End)
 	}
 
-	for _, res := range results {
-		summary := r.collector.Summary(res.Target, 5*time.Minute, roundTime.Add(time.Millisecond))
-		if ev := r.evaluator.Observe(res, summary, roundTime); ev != nil {
-			r.recordIncident(*ev)
+	if sampled {
+		for _, res := range results {
+			summary := r.collector.Summary(res.Target, 5*time.Minute, roundTime.Add(time.Millisecond))
+			if ev := r.evaluator.Observe(res, summary, roundTime); ev != nil {
+				r.recordIncident(*ev)
+			}
+		}
+	}
+
+	if tr, ok := r.fast.Observe(roundTime, RoundFailed(results)); ok {
+		switch tr.To {
+		case probe.ModeFast:
+			r.logger.Printf("FASTPOLL start at=%s interval=%s (external probe failed)", tr.At.Format(time.RFC3339), r.fast.Fast)
+		case probe.ModeSlow:
+			r.logger.Printf("FASTPOLL cap reached after %s, slowing to %s at=%s", tr.Window.Round(time.Second), r.fast.Slow, tr.At.Format(time.RFC3339))
+		case probe.ModeNormal:
+			r.logger.Printf("FASTPOLL end at=%s window=%s, back to %s", tr.At.Format(time.RFC3339), tr.Window.Round(time.Second), r.fast.Normal)
 		}
 	}
 }
